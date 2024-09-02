@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset, random_split
 import torch.nn.utils as utils
 import torch.optim.lr_scheduler as lr_scheduler
-from torchvision import datasets, transforms
+from torchvision import datasets, transforms, models
 import numpy as np
 # Your main function
 def main():
@@ -120,7 +120,7 @@ def main():
             x = self.avgpool(x)
             # Flatten the output to prepare it for the fully connected layer
             x = torch.flatten(x, 1)
-            x = self.dropout(x) # Applying dropout before the final output layer
+            # x = self.dropout(x) # Applying dropout before the final output layer
             # Pass through the fully connected layer to get the final classification
             x = self.fc(x)
 
@@ -292,10 +292,12 @@ def main():
                     nn.init.constant_(m.bias, 0)
             
     # Initialize the model, loss function, and optimizer
-    # model = CatsVsDogsCNN().to(device)
+    model = LittleResNet().to(device)
+    model =  models.resnet34(pretrained=True)
     # Create an instance of the model with two output classes
-    model = LittleResNet(num_classes=2).to(device)
-
+    # model = LittleResNet(num_classes=2).to(device)
+    model.fc = nn.Linear(model.fc.in_features, 2)
+    model = model.to(device)
     activations = dict()
 
     def get_activation(name):
@@ -320,9 +322,11 @@ def main():
     register_hooks(model)
 
     criterion = nn.CrossEntropyLoss()
+    # criterion = nn.SmoothL1Loss()
+    
     initial_lr = 1e-3
-    # optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr,  weight_decay=1e-4)
-    optimizer = torch.optim.SGD(model.parameters(), lr=initial_lr, momentum=0.9)
+    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr,  weight_decay=1e-4)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=initial_lr, momentum=0.9)
     # warmup_epochs = 5
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
     batch_size = 32
@@ -370,24 +374,50 @@ def main():
         accuracy = correct / labels.size(0)  # Calculate accuracy
         return accuracy
 
-    # Define transforms for the data
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # Resizing the images to 224x224 as expected by ResNet
-        transforms.RandomHorizontalFlip(), 
-        transforms.ToTensor(),      # Converting the images to PyTorch tensors
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])  # Normalizing based on ImageNet standards
+    # # Define transforms for the data
+    # transform = transforms.Compose([
+    #     transforms.Resize((224, 224)),  # Resizing the images to 224x224 as expected by ResNet
+    #     transforms.RandomHorizontalFlip(), 
+    #     transforms.ToTensor(),      # Converting the images to PyTorch tensors
+    #     transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])  # Normalizing based on ImageNet standards
+    # ])
+    # Define transformations for the training set
+
+    train_transforms = transforms.Compose([
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    dataset = datasets.ImageFolder(root='PetImages', transform=transform)
+
+    # Define transformations for the validation set
+    val_transforms = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+        # Load the dataset with training transformations
+    train_dataset = datasets.ImageFolder(root='PetImages', transform=train_transforms)
+
+    # Load the dataset with validation transformations
+    # val_dataset = datasets.ImageFolder(root='PetImages', transform=val_transforms)
+
+    # dataset = datasets.ImageFolder(root='PetImages', transform=transform)
 
     # Split the dataset into training and validation sets (e.g., 80% train, 20% validation)
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    train_size = int(0.8 * (len(train_dataset)))
+    val_size = len(train_dataset) - train_size - 100 
+    eyeball_set_size = 100
+    # train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-
+    # Split the train dataset into a smaller train set and a validation set
+    train_dataset, val_dataset, eyeball_set = random_split(train_dataset, [train_size, val_size, eyeball_set_size])
+    # _, val_dataset = random_split(val_dataset, [train_size, val_size, eyeball_set_size])
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    eye_loader = DataLoader(eyeball_set, batch_size=batch_size, shuffle=False, num_workers=4)
 
     train_losses = []
     val_losses = []
@@ -409,7 +439,7 @@ def main():
             '''
             optimizer.zero_grad()
             outputs = model(batch_data)
-        
+            
             loss = criterion(outputs, batch_labels)
             loss.backward()
 
@@ -420,13 +450,18 @@ def main():
 
             # Gradient clipping
             utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
+            avg_grad_norm = 0.0
             grad_norms = []
             for param in model.parameters():
                 if param.grad is not None:
                     grad_norms.append(param.grad.norm().item())
-            
-            gradients.append(sum(grad_norms) / len(grad_norms))
+
+            if len(grad_norms) > 0:
+                avg_grad_norm = sum(grad_norms) / len(grad_norms)
+            else:
+                avg_grad_norm = 0.0  # or handle it in another way
+
+            gradients.append(avg_grad_norm)
 
             optimizer.step()
 
@@ -472,9 +507,37 @@ def main():
 
             val_loss = running_val_loss / len(val_loader.dataset)
             val_losses.append(val_loss)
-            # scheduler.step(metrics = val_loss)
+            scheduler.step(metrics = val_loss)
+
             # Print loss values
             print(f'Epoch {epoch+1}/{num_epochs}, Training Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}')
+
+
+    #eyeball validation
+    model.eval()  # Set model to evaluation mode
+    with torch.no_grad():
+        for inputs, targets in eye_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            output = model(inputs)
+            loss = criterion(output, targets)
+            _, predicted = torch.max(output.data, 1)
+
+            # Loop through the batch to visualize each image
+            for i in range(inputs.size(0)):  # Iterate over each item in the batch
+                if predicted[i] != targets[i]:  # Check if the prediction matches the target
+                    img = inputs[i].squeeze().cpu()  # Get the ith image from the batch
+                    mean = [0.485, 0.456, 0.406]
+                    std = [0.229, 0.224, 0.225]
+
+                    # If img is a PyTorch tensor, you can use the following:
+                    img = img * torch.tensor(std).view(3, 1, 1) + torch.tensor(mean).view(3, 1, 1)
+                    # Convert to numpy if necessary
+                    img = img.numpy()
+                    # Assuming img is in (3, 224, 224) format
+                    img = img.transpose(1, 2, 0)  # Change shape from (3, 224, 224) to (224, 224, 3)
+                    plt.imshow(img, cmap='gray')  # Display the image
+                    plt.title(f'True: {targets[i].item()}, Pred: {predicted[i].item()}')
+                    plt.show()
 
         # Plotting
     plt.figure(figsize=(12, 6))
@@ -494,7 +557,7 @@ def main():
     plt.plot(range(1, num_epochs + 1), accuracy, label='Accuracy', color='blue', marker='o')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('Validation Loss')
+    plt.title('Accuracy')
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
